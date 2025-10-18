@@ -1,3 +1,26 @@
+'''
+This script is the main entry point for training a Few-Shot Semantic Segmentation model
+on the custom disaster dataset.
+
+To run the 5-shot segmentation experiment, follow these steps:
+
+1. Generate the data split configuration file:
+   Before the first run, you must generate the JSON file that defines the support and query sets.
+   Execute the following command in your terminal, replacing the path with the absolute path
+   to your 'Exp_Disaster_Few-Shot' dataset directory:
+
+python3 datasets/generate_disaster_splits.py --path /path/to/your/_datasets/Exp_Disaster_Few-Shot --shots 5
+
+2. Run the Training:
+   Use the following command to start the 5-shot training and evaluation process.
+   
+python3 train.py --models DINO --methods linear --dataset disaster --nb-shots 10 --lr 0.00001 --input-size 512
+
+python3 train.py --models DINO --methods svf --dataset disaster --nb-shots 10 --lr 0.00001 --input-size 512
+
+
+
+'''
 import datetime
 import time
 import torch
@@ -8,7 +31,7 @@ import copy
 import random
 import numpy as np
 import torch.nn.functional as F
-from utils.train_utils import get_lr_function, get_loss_fun,get_optimizer,get_dataset_loaders,get_val_dataset
+from utils.train_utils import get_lr_function, get_loss_fun,get_optimizer,get_dataset_loaders
 from utils.precise_bn import compute_precise_bn_stats
 import warnings
 warnings.filterwarnings("ignore")
@@ -146,6 +169,7 @@ def train_multiple(configs, model, method, dataset, number_of_shots):
 def train_one(config, model_str, method, dataset, number_of_shots):
     setup_env(config)
     save_dir = config["save_dir"]
+    os.makedirs(save_dir, exist_ok=True)
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     epochs=config["epochs"]
     num_classes=config["num_classes"] 
@@ -162,8 +186,10 @@ def train_one(config, model_str, method, dataset, number_of_shots):
 
     if model_str == "DINO" :
         from models.backbones.dino import DINO_linear
-        version = 2 #dinov2
-        model = DINO_linear(version, method, num_classes, input_size, config["model_repo_path"], config["model_path"])
+        version = config.get("dino_version", 2) # Default to 2 if not specified
+        dinov2_size = config.get("dinov2_size", "base") # Default to base if not specified
+        print(f"Using DINO version: {version} with size: {dinov2_size}")
+        model = DINO_linear(version, method, num_classes, input_size, config["model_repo_path"], config["model_path"], dinov2_size=dinov2_size)
     else:
         raise NotImplementedError(f"Model {model_str} not implemented")
 
@@ -171,10 +197,22 @@ def train_one(config, model_str, method, dataset, number_of_shots):
     print_trainable_parameters(model.encoder)
 
     if method in ["svf", "lora", "vpt"] :
-        model_tmp = torch.load(f"{save_dir}/{model_str}_linear_{dataset}_{number_of_shots}shot_run{run}.pth")
-        model.decoder = model_tmp.decoder
-        model.bn = model_tmp.bn
-        del model_tmp
+        linear_weights_path = f"{save_dir}/{model_str}_linear_{dataset}_{number_of_shots}shot_run{run}_best.pth"
+        print(f"Loading pretrained decoder from: {linear_weights_path}")
+
+        if not os.path.exists(linear_weights_path):
+            raise FileNotFoundError(f"Could not find pretrained linear model at {linear_weights_path}. Please run the 'linear' method first.")
+
+        state_dict = torch.load(linear_weights_path)
+
+        # Create a new state_dict for the decoder and bn layers
+        decoder_state_dict = {k.replace('decoder.', ''): v for k, v in state_dict.items() if k.startswith('decoder.')}
+        bn_state_dict = {k.replace('bn.', ''): v for k, v in state_dict.items() if k.startswith('bn.')}
+
+        model.decoder.load_state_dict(decoder_state_dict)
+        model.bn.load_state_dict(bn_state_dict)
+        print("Successfully loaded pretrained decoder and bn layers.")
+
     model.to(device=device)
 
     train_loader, val_loader,train_set=get_dataset_loaders(config)
@@ -216,8 +254,10 @@ def train_one(config, model_str, method, dataset, number_of_shots):
                 best_global_accuracy=acc_global
             if mIOU > best_mIU:
                 best_mIU=mIOU
-    if method == "linear" : 
-        torch.save(model, f"{save_dir}/{model_str}_{method}_{dataset}_{number_of_shots}shot_run{run}.pth")
+                print(f"New best mIoU: {best_mIU}. Saving model...")
+                save_path = f"{save_dir}/{model_str}_{method}_{dataset}_{number_of_shots}shot_run{run}_best.pth"
+                torch.save(model.state_dict(), save_path)
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print(f"Best mIOU: {best_mIU}\n")
@@ -228,12 +268,11 @@ def train_one(config, model_str, method, dataset, number_of_shots):
 
 def train_3runs(model, method, dataset, number_of_shots, learning_rate, input_size):
     print(f'dataset is {dataset}')
-    if dataset == "cityscapes" : 
-        config_filename= "configs/cityscapes.yaml"
-    if dataset == "coco" : 
-        config_filename="configs/coco.yaml"
-    if dataset == "ppdls" : 
-        config_filename = "configs/ppdls.yaml"
+    if dataset == "disaster" :
+        config_filename = "configs/disaster.yaml"
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset}. This project is configured only for the 'disaster' dataset.")
+
     with open(config_filename) as file:
         config=yaml.full_load(file)
     config["lr"] = learning_rate

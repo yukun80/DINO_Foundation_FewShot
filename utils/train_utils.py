@@ -1,7 +1,5 @@
 from .losses import BootstrappedCE
 from .lr_schedulers import poly_lr_scheduler,cosine_lr_scheduler,step_lr_scheduler,exp_lr_scheduler
-from ..data import get_cityscapes, build_val_transform,get_coco, get_ppdls
-from ..datasets.cityscapes import Cityscapes
 import torch
 
 def get_lr_function(config,total_iterations):
@@ -60,74 +58,44 @@ def get_optimizer(model,config):
         weight_decay=config["weight_decay"]
     )
 
-def get_val_dataset(config):
-    val_input_size=config["val_input_size"]
-    val_label_size=config["val_label_size"]
-
-    root=config["dataset_dir"]
-    name=config["dataset_name"]
-    val_split=config["val_split"]
-    if name=="cityscapes":
-        val_transform=build_val_transform(val_input_size,val_label_size)
-        val = Cityscapes(root, split=val_split, target_type="semantic",
-                         transforms=val_transform, class_uniform_pct=0)
-    else:
-        raise NotImplementedError()
-    return val
-
 def get_dataset_loaders(config):
     name=config["dataset_name"]
-    if name=="cityscapes":
-        train_loader, val_loader,train_set=get_cityscapes(
-            config["dataset_dir"],
-            config["batch_size"],
-            config["train_min_size"],
-            config["train_max_size"],
-            config["train_crop_size"],
-            config["val_input_size"],
-            config["val_label_size"],
-            config["aug_mode"],
-            config["class_uniform_pct"],
-            config["train_split"],
-            config["val_split"],
-            config["num_workers"],
-            config["ignore_value"],
-            config["RNG_seed"],
-            config["number_of_shots"]
+    if name == "disaster":
+        from datasets.disaster import DisasterDataset
+        import torch.utils.data as data
+
+        # For few-shot, the 'train_split' from the config ('support') is our training set
+        train_set = DisasterDataset(
+            root=".", # The paths in the split file are relative to the project root
+            split_file=config["split_file"],
+            mode=config["train_split"],
         )
-    elif name == "ppdls" : 
-        train_loader, val_loader,train_set=get_ppdls(
-            config["dataset_dir"],
-            config["batch_size"],
-            config["train_min_size"],
-            config["train_max_size"],
-            config["train_crop_size"],
-            config["val_input_size"],
-            config["val_label_size"],
-            config["aug_mode"],
-            config["num_workers"],
-            config["ignore_value"],
-            config["RNG_seed"],
-            config["split_path"],
-            config["number_of_shots"]
+        
+        # The 'val_split' ('query') is our validation set
+        val_set = DisasterDataset(
+            root=".", # The paths in the split file are relative to the project root
+            split_file=config["split_file"],
+            mode=config["val_split"],
         )
-    elif name=="coco":
-        train_loader, val_loader,train_set=get_coco(
-            config["dataset_dir"],
-            config["batch_size"],
-            config["train_min_size"],
-            config["train_max_size"],
-            config["train_crop_size"],
-            config["val_input_size"],
-            config["val_label_size"],
-            config["aug_mode"],
-            config["num_workers"],
-            config["ignore_value"],
-            config["RNG_seed"],
-            config["number_of_shots"]
+
+        train_loader = data.DataLoader(
+            train_set,
+            batch_size=config["batch_size"],
+            shuffle=True, # Shuffle the support set for training
+            num_workers=config["num_workers"],
+            pin_memory=True,
+            drop_last=True,
+        )
+
+        val_loader = data.DataLoader(
+            val_set,
+            batch_size=config["batch_size"],
+            shuffle=False, # No need to shuffle the query set for evaluation
+            num_workers=config["num_workers"],
+            pin_memory=True,
         )
     else:
-        raise NotImplementedError()
+        raise NotImplementedError(f"Dataset '{name}' is not supported.")
     print("train size:", len(train_loader))
     print("val size:", len(val_loader))
     return train_loader, val_loader,train_set
