@@ -43,18 +43,43 @@ Follow [DATASET.md](DATASET.md) for instructions on how to download the differen
 ### Configs
 The running configurations can be modified in `configs`. 
 
-### Running
-For DINOv2 with linear probing on cityscapes:
+### Running with Sacred
+
+With the integration of Sacred, all experiments are now run using a new command structure. This enhances reproducibility and organizes all outputs.
+
+**Base Command Structure:**
+`python3 <script_name>.py with <config_key>=<value> ...`
+
+**Example: Training**
+
+To run training for DINOv2 with linear probing on the `disaster` dataset (10-shot):
 ```bash
-   python3 train.py --models DINO --methods linear --dataset cityscapes --nb-shots 1 --lr 0.2
+python3 train.py with method=linear dataset=disaster nb_shots=10 lr=0.01 run_id=1
 ```
-Possible models : DINO.
+- To run multiple experiments for averaging, simply increment the `run_id` for each run (e.g., `run_id=2`, `run_id=3`).
+- All results, logs, and model checkpoints will be saved in a unique directory under `experiments/FSS_Training/`.
 
-For the backbones, they can be downloaded from their official repo, after that change the `model_path` in `configs`
+**Example: Evaluation**
 
-Possible methods : linear, multilayer, svf, lora.
+To evaluate a trained model, you must provide the path to the model checkpoint.
+```bash
+python3 eval.py with model_path='experiments/FSS_Training/1/best_model.pth' nb_shots=10
+```
+- Evaluation metrics will be logged and saved in a new run under `experiments/FSS_Evaluation/`.
 
-Possible datasets : cityscapes, coco, ppdls.
+**Example: Prediction**
+
+To generate segmentation masks from a trained model:
+```bash
+python3 predict.py with model_path='experiments/FSS_Training/1/best_model.pth' nb_shots=10
+```
+- The resulting images will be saved as artifacts in a new run under `experiments/FSS_Prediction/`.
+
+**Available Options:**
+- **Scripts**: `train.py`, `eval.py`, `predict.py`
+- **Methods**: `linear`, `multilayer`, `svf`, `lora`.
+- **Models**: `DINO` (configurable for v1/v2 and size in `configs/disaster.yaml`).
+- **Datasets**: The framework is currently optimized for the `disaster` dataset.
 
 
 ## Acknowledgement

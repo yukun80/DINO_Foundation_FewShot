@@ -33,8 +33,11 @@ def create_backbone_dinov2(method, model_repo_path, model_path, dinov2_size="bas
     elif dinov2_size == 'small':
         dino_backbone = vit_small(patch_size = 14, img_size = 524, init_values=1.0, block_chunks=0, num_register_tokens=0)
         dino_backbone.load_state_dict(torch.load(os.path.join(model_path,"dinov2_vits14_pretrain.pth")))
+    elif dinov2_size == 'large':
+        dino_backbone = vit_large(patch_size = 14, img_size = 524, init_values=1.0, block_chunks=0, num_register_tokens=0)
+        dino_backbone.load_state_dict(torch.load(os.path.join(model_path,"dinov2_vitl14_pretrain.pth")))
     else:
-        raise ValueError(f"Unsupported DINOv2 size: '{dinov2_size}'. Please choose 'small' or 'base'.")
+        raise ValueError(f"Unsupported DINOv2 size: '{dinov2_size}'. Please choose 'small', 'base' or 'large'.")
 
     if method == "multilayer" :
         n = [8,9,10,11]
@@ -59,8 +62,10 @@ class DINO_linear(nn.Module):
                 self.in_channels = 768
             elif dinov2_size == 'small':
                 self.in_channels = 384
+            elif dinov2_size == 'large':
+                self.in_channels = 1024
             else:
-                raise ValueError(f"Unsupported DINOv2 size: '{dinov2_size}'. Please choose 'small' or 'base'.")
+                raise ValueError(f"Unsupported DINOv2 size: '{dinov2_size}'. Please choose 'small', 'base' or 'large'.")
         else : # DINOv1
             self.encoder = create_backbone_dino(method, model_repo_path, model_path)
             self.in_channels = 384 # DINOv1 vit_small has 384

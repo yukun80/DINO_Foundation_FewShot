@@ -8,3 +8,5 @@ opencv-python
 scipy
 pycocotools
 natsort
+sacred
+pymongo

@@ -1,43 +1,104 @@
-'''
-This script is the main entry point for training a Few-Shot Semantic Segmentation model
-on the custom disaster dataset.
+"""
+This script is the main entry point for training a Few-Shot Semantic Segmentation model.
+It has been refactored to use Sacred for robust experiment tracking and management.
 
-To run the 5-shot segmentation experiment, follow these steps:
+--- Sacred Integration Details ---
 
-1. Generate the data split configuration file:
-   Before the first run, you must generate the JSON file that defines the support and query sets.
-   Execute the following command in your terminal, replacing the path with the absolute path
-   to your 'Exp_Disaster_Few-Shot' dataset directory:
+Purpose:
+    - To provide a systematic, reproducible, and organized way to run training experiments.
+    - Each run is saved in a unique, timestamped directory under `experiments/FSS_Training`.
+    - Manages configurations, logs metrics, and stores model artifacts automatically.
 
-python3 datasets/generate_disaster_splits.py --path /path/to/your/_datasets/Exp_Disaster_Few-Shot --shots 5
+Key Changes:
+    - Replaced `ArgumentParser` with Sacred's configuration system.
+    - Consolidated training logic into a main function decorated with `@ex.automain`.
+    - The concept of multiple runs (e.g., `train_3runs`) is now handled by executing
+      the script multiple times with different `run_id`s, ensuring each is tracked separately.
 
-2. Run the Training:
-   Use the following command to start the 5-shot training and evaluation process.
-   
-python3 train.py --models DINO --methods linear --dataset disaster --nb-shots 10 --lr 0.00001 --input-size 512
+--- Example Usage ---
 
-python3 train.py --models DINO --methods svf --dataset disaster --nb-shots 10 --lr 0.00001 --input-size 512
+1.  **Generate Data Splits (if not already done):**
+    python3 datasets/generate_disaster_splits.py --path /path/to/your/Exp_Disaster_Few-Shot --shots 10
 
+2.  **Run Training with Sacred:**
+    The syntax is `python3 train.py with <key>=<value>`.
 
+    - **Linear Probing (10-shot, LR=0.01, Run 1):**
+      python3 train.py with method=linear nb_shots=10 lr=0.01 run_id=1
+      
+    - **multilayer**
+      python3 train.py with method=multilayer nb_shots=10 lr=0.001 run_id=1
 
-'''
+    - **SVF (10-shot, LR=0.0001, Run 1, requires a pre-trained linear decoder):**
+      python3 train.py with method=svf nb_shots=10 lr=0.0001 run_id=1
+
+    - **To run the second and third runs, simply increment `run_id`:**
+      python3 train.py with method=linear nb_shots=10 lr=0.01 run_id=2
+      python3 train.py with method=linear nb_shots=10 lr=0.01 run_id=3
+"""
+
+# --- Example Command ---
+# python3 train.py with method=linear nb_shots=10 lr=0.01 run_id=1
+# -----------------------
+
 import datetime
 import time
 import torch
 import yaml
 import torch.cuda.amp as amp
 import os
-import copy
 import random
 import numpy as np
-import torch.nn.functional as F
-from utils.train_utils import get_lr_function, get_loss_fun,get_optimizer,get_dataset_loaders
+from sacred import Experiment
+from sacred.observers import FileStorageObserver
+
+# --- Project-specific Imports ---
+from utils.train_utils import get_lr_function, get_loss_fun, get_optimizer, get_dataset_loaders
 from utils.precise_bn import compute_precise_bn_stats
+from models.backbones.dino import DINO_linear
 import warnings
 warnings.filterwarnings("ignore")
 
+# --- Sacred Experiment Setup ---
+ex = Experiment("FSS_Training")
+# All experiment artifacts will be stored in 'experiments/FSS_Training/{run_id}'
+ex.observers.append(FileStorageObserver('experiments/FSS_Training'))
+
+
+@ex.config
+def cfg():
+    """
+    Defines the default configuration for the experiment using Sacred.
+    These values can be easily overridden from the command line.
+    """
+    # Load base configuration from the YAML file
+    with open("configs/disaster.yaml") as file:
+        config = yaml.full_load(file)
+
+    # --- Command-line accessible parameters ---
+    model_name = "DINO"
+    method = "linear"
+    dataset = "disaster"
+    nb_shots = 10
+    lr = 0.01
+    input_size = 512
+    run_id = 1  # Used to distinguish between multiple runs of the same configuration
+
+    # Merge CLI-accessible parameters into the main config dictionary
+    config.update({
+        "model_name": model_name,
+        "method": method,
+        "dataset": dataset,
+        "number_of_shots": nb_shots,
+        "lr": lr,
+        "input_size": input_size,
+        "run": run_id,
+        "RNG_seed": run_id - 1  # Seed depends on the run_id for reproducibility
+    })
+
 
 def print_trainable_parameters(model):
+    """Prints the number of trainable parameters in a model."""
     trainable_params = 0
     all_param = 0
     for _, param in model.named_parameters():
@@ -48,261 +109,204 @@ def print_trainable_parameters(model):
         f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param:.2f}"
     )
 
-class ConfusionMatrix(object):
+
+class ConfusionMatrix:
+    """
+    A robust confusion matrix for evaluating semantic segmentation.
+    """
     def __init__(self, num_classes, exclude_classes):
         self.num_classes = num_classes
         self.mat = torch.zeros((num_classes, num_classes), dtype=torch.int64)
-        self.exclude_classes=exclude_classes
+        self.exclude_classes = exclude_classes
 
-    def update(self, a, b):
-        a=a.cpu()
-        b=b.cpu()
+    def update(self, pred, target):
+        pred = pred.cpu()
+        target = target.cpu()
         n = self.num_classes
-        k = (a >= 0) & (a < n)
-        inds = n * a + b
-        inds=inds[k]
+        k = (target >= 0) & (target < n)
+        inds = n * target + pred
+        inds = inds[k]
         self.mat += torch.bincount(inds, minlength=n**2).reshape(n, n)
-
-    def reset(self):
-        self.mat.zero_()
 
     def compute(self):
         h = self.mat.float()
         acc_global = torch.diag(h).sum() / h.sum()
         acc = torch.diag(h) / h.sum(1)
         iu = torch.diag(h) / (h.sum(1) + h.sum(0) - torch.diag(h))
+        return acc_global.item() * 100, (acc * 100).tolist(), (iu * 100).tolist()
 
-        acc_global=acc_global.item() * 100
-        acc=(acc * 100).tolist()
-        iu=(iu * 100).tolist()
-        return acc_global, acc, iu
     def __str__(self):
-        acc_global, acc, iu = self.compute()
-        acc_global=round(acc_global,2)
-        IOU=[round(i,2) for i in iu]
-        mIOU=sum(iu)/len(iu)
-        mIOU=round(mIOU,2)
-        reduced_iu=[iu[i] for i in range(self.num_classes) if i not in self.exclude_classes]
-        mIOU_reduced=sum(reduced_iu)/len(reduced_iu)
-        mIOU_reduced=round(mIOU_reduced,2)
-        return f"IOU: {IOU}\nmIOU: {mIOU}, mIOU_reduced: {mIOU_reduced}, accuracy: {acc_global}"
+        acc_global, _, iu = self.compute()
+        mIOU = sum(iu) / len(iu)
+        reduced_iu = [iu[i] for i in range(self.num_classes) if i not in self.exclude_classes]
+        mIOU_reduced = sum(reduced_iu) / len(reduced_iu)
+        return (
+            f"mIoU: {mIOU:.2f} | mIoU (reduced): {mIOU_reduced:.2f} | "
+            f"Global Accuracy: {acc_global:.2f}"
+        )
 
-def evaluate(model, data_loader, device, confmat,mixed_precision,print_every,max_eval):
+
+def evaluate(model, data_loader, device, confmat, mixed_precision, max_eval):
+    """Evaluates the model on the validation set."""
     model.eval()
-    assert(isinstance(confmat,ConfusionMatrix))
     with torch.no_grad():
-        for i,(image, target) in enumerate(data_loader):
-            if (i+1)%print_every==0:
-                print(i+1)
+        for i, (image, target, _) in enumerate(data_loader):
             image, target = image.to(device), target.to(device)
             with amp.autocast(enabled=mixed_precision):
                 output = model(image)
             output = torch.nn.functional.interpolate(output, size=target.shape[-2:], mode='bilinear', align_corners=False)
-            confmat.update(target.flatten(), output.argmax(1).flatten())
-            if i+1==max_eval:
+            confmat.update(output.argmax(1).flatten(), target.flatten())
+            if i + 1 == max_eval:
                 break
     return confmat
 
-def train_one_epoch(model, loss_fun, optimizer, loader, lr_scheduler, print_every, mixed_precision, scaler):
+
+def train_one_epoch(model, loss_fun, optimizer, loader, lr_scheduler, mixed_precision, scaler, _run, epoch):
+    """Trains the model for one epoch."""
     model.train()
-    losses=0
-    for t, x in enumerate(loader):
-        image, target=x
+    total_loss = 0
+    for t, (image, target, _) in enumerate(loader):
         image, target = image.to("cuda"), target.to("cuda")
         with amp.autocast(enabled=mixed_precision):
             output = model(image)
             output = torch.nn.functional.interpolate(output, size=target.shape[-2:], mode='bilinear', align_corners=False)
-            loss = loss_fun(output, torch.tensor(target,dtype = torch.int64))
+            loss = loss_fun(output, target.long())
+
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         lr_scheduler.step()
-        losses+=loss.item()
-        if (t+1) % print_every==0:
-            print(t+1,loss.item())
-    num_iter=len(loader)
-    print(losses/num_iter)
-    return losses/num_iter
+        
+        total_loss += loss.item()
+        _run.log_scalar("metrics.batch_loss", loss.item(), step=epoch * len(loader) + t)
+
+    avg_loss = total_loss / len(loader)
+    print(f"Epoch {epoch} | Average Loss: {avg_loss:.4f}")
+    return avg_loss
+
 
 def get_epochs_to_eval(config):
-    epochs=config["epochs"]
-    eval_every_k_epochs=config["eval_every_k_epochs"]
-    eval_best_on_epochs=[i*eval_every_k_epochs-1 for i in range(1,epochs//eval_every_k_epochs+1)]
-    if epochs-1 not in eval_best_on_epochs:
-        eval_best_on_epochs.append(epochs-1)
-    if 0 not in eval_best_on_epochs:
-        eval_best_on_epochs.append(0)
+    """Determines which epochs should trigger an evaluation."""
+    epochs = config["epochs"]
+    eval_every = config["eval_every_k_epochs"]
+    eval_epochs = {i * eval_every - 1 for i in range(1, epochs // eval_every + 1)}
+    eval_epochs.add(0)
+    eval_epochs.add(epochs - 1)
     if "eval_last_k_epochs" in config:
-        for i in range(max(epochs-config["eval_last_k_epochs"],0),epochs):
-            if i not in eval_best_on_epochs:
-                eval_best_on_epochs.append(i)
-    eval_best_on_epochs=sorted(eval_best_on_epochs)
-    return eval_best_on_epochs
+        eval_epochs.update(range(max(0, epochs - config["eval_last_k_epochs"]), epochs))
+    return sorted(list(eval_epochs))
+
+
 def setup_env(config):
-    torch.backends.cudnn.benchmark=True
-    seed=0
-    if "RNG_seed" in config:
-        seed=config["RNG_seed"]
+    """Sets up the environment for reproducibility."""
+    torch.backends.cudnn.benchmark = True
+    seed = config.get("RNG_seed", 0)
     torch.manual_seed(seed)
     random.seed(seed)
-    np.random.seed(seed) 
-def train_multiple(configs, model, method, dataset, number_of_shots):
-    global_accuracies=[]
-    mIOUs=[]
-    new_configs=[]
-    for config in configs:
-        new_configs.append(config)
-    for i, config in enumerate(new_configs):
-        config["model"] = model
-        config["method"] = method
-        config["dataset"] = dataset
-        config["number_of_shots"] = number_of_shots
-        learning_rate = config["lr"]
+    np.random.seed(seed)
+    print(f"Environment set up with seed: {seed}")
 
-        run = config["run"]
-        print(f"START RUN {run}")
-        best_mIU,best_global_accuracy=train_one(config, model, method, dataset, number_of_shots)
-        mIOUs.append(best_mIU)
-        global_accuracies.append(best_global_accuracy)
-    return mIOUs,global_accuracies
-def train_one(config, model_str, method, dataset, number_of_shots):
+
+@ex.automain
+def main(_run, config):
+    """
+    The main entry point for a training run, managed by Sacred.
+    """
     setup_env(config)
-    save_dir = config["save_dir"]
-    os.makedirs(save_dir, exist_ok=True)
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    epochs=config["epochs"]
-    num_classes=config["num_classes"] 
-    exclude_classes=config["exclude_classes"]
-    mixed_precision=config["mixed_precision"]
-    run=config["run"]
-    max_eval=config["max_eval"]
-    eval_print_every=config["eval_print_every"]
-    train_print_every=config["train_print_every"]
-    bn_precise_stats=config["bn_precise_stats"]
-    bn_precise_num_samples=config["bn_precise_num_samples"]
-    input_size = config["input_size"]
-    print("input size is ", input_size)
+    
+    # --- Configuration & Setup ---
+    save_dir = _run.observers[0].dir
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    print(f"Starting Run {_run._id}: {config['method']} on {config['dataset']} ({config['number_of_shots']}-shot)")
+    print(f"Artifacts will be saved to: {save_dir}")
 
-    if model_str == "DINO" :
-        from models.backbones.dino import DINO_linear
-        version = config.get("dino_version", 2) # Default to 2 if not specified
-        dinov2_size = config.get("dinov2_size", "base") # Default to base if not specified
-        print(f"Using DINO version: {version} with size: {dinov2_size}")
-        model = DINO_linear(version, method, num_classes, input_size, config["model_repo_path"], config["model_path"], dinov2_size=dinov2_size)
+    # --- Model Initialization ---
+    if config["model_name"] == "DINO":
+        model = DINO_linear(
+            version=config.get("dino_version", 2),
+            method=config["method"],
+            num_classes=config["num_classes"],
+            input_size=config["input_size"],
+            model_repo_path=config["model_repo_path"],
+            model_path=config["model_path"],
+            dinov2_size=config.get("dinov2_size", "base")
+        )
     else:
-        raise NotImplementedError(f"Model {model_str} not implemented")
+        raise NotImplementedError(f"Model '{config['model_name']}' is not supported.")
 
     print_trainable_parameters(model)
-    print_trainable_parameters(model.encoder)
 
-    if method in ["svf", "lora", "vpt"] :
-        linear_weights_path = f"{save_dir}/{model_str}_linear_{dataset}_{number_of_shots}shot_run{run}_best.pth"
-        print(f"Loading pretrained decoder from: {linear_weights_path}")
-
+    # --- Load Pre-trained Decoder if Applicable ---
+    if config["method"] in ["svf", "lora", "vpt"]:
+        linear_weights_path = config.get("linear_weights_path") or \
+            f"./exp/models_disaster/{config['model_name']}_linear_{config['dataset']}_{config['number_of_shots']}shot_run{config['run']}_best.pth"
+        
+        print(f"Attempting to load pre-trained decoder from: {linear_weights_path}")
         if not os.path.exists(linear_weights_path):
-            raise FileNotFoundError(f"Could not find pretrained linear model at {linear_weights_path}. Please run the 'linear' method first.")
+            raise FileNotFoundError(f"Pre-trained decoder not found at {linear_weights_path}. Please run the 'linear' method first.")
+        
+        state_dict = torch.load(linear_weights_path, map_location='cpu')
+        model.decoder.load_state_dict({k.replace('decoder.', ''): v for k, v in state_dict.items() if k.startswith('decoder.')})
+        model.bn.load_state_dict({k.replace('bn.', ''): v for k, v in state_dict.items() if k.startswith('bn.')})
+        print("Successfully loaded pre-trained decoder and batch norm layers.")
 
-        state_dict = torch.load(linear_weights_path)
+    model.to(device)
 
-        # Create a new state_dict for the decoder and bn layers
-        decoder_state_dict = {k.replace('decoder.', ''): v for k, v in state_dict.items() if k.startswith('decoder.')}
-        bn_state_dict = {k.replace('bn.', ''): v for k, v in state_dict.items() if k.startswith('bn.')}
+    # --- Data, Optimizer, and Scheduler ---
+    train_loader, val_loader, train_set = get_dataset_loaders(config)
+    optimizer = get_optimizer(model, config)
+    scaler = amp.GradScaler(enabled=config["mixed_precision"])
+    loss_fun = get_loss_fun(config)
+    total_iterations = len(train_loader) * config["epochs"]
+    lr_scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_iterations, power=config["poly_power"])
 
-        model.decoder.load_state_dict(decoder_state_dict)
-        model.bn.load_state_dict(bn_state_dict)
-        print("Successfully loaded pretrained decoder and bn layers.")
-
-    model.to(device=device)
-
-    train_loader, val_loader,train_set=get_dataset_loaders(config)
-    total_iterations=len(train_loader) * epochs
-    optimizer = get_optimizer(model,config)
-    scaler = amp.GradScaler(enabled=mixed_precision)
-    loss_fun=get_loss_fun(config)
-    lr_function=get_lr_function(config,total_iterations)
-    lr_scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters = total_iterations, power = config["poly_power"])
-    epoch_start=0
-    best_mIU=0
-    eval_on_epochs=get_epochs_to_eval(config)
-    print("eval on epochs: ",eval_on_epochs)
+    # --- Training & Evaluation Loop ---
     start_time = time.time()
-    best_global_accuracy=0
-    for epoch in range(epoch_start,epochs):
-        print(f"epoch: {epoch}")
-        if hasattr(train_set, 'build_epoch'):
-            print("build epoch")
-            train_set.build_epoch()
-        average_loss=train_one_epoch(model, loss_fun, optimizer, train_loader, lr_scheduler, print_every=train_print_every, mixed_precision=mixed_precision, scaler=scaler)
-        if epoch in eval_on_epochs:
-            if bn_precise_stats:
-                print("calculating precise bn stats")
-                compute_precise_bn_stats(model,train_loader,bn_precise_num_samples)
-            confmat=ConfusionMatrix(num_classes,exclude_classes)
-            confmat = evaluate(model, val_loader, device,confmat,
-                               mixed_precision, eval_print_every,max_eval)
-            print(confmat)
-            acc_global, acc, iu = confmat.compute()
-            acc_global=round(acc_global,2)
-            IOU=[round(i,2) for i in iu]
-            mIOU=sum(iu)/len(iu)
-            mIOU=round(mIOU,2)
-            reduced_iu=[iu[i] for i in range(confmat.num_classes) if i not in confmat.exclude_classes]
-            mIOU_reduced=sum(reduced_iu)/len(reduced_iu)
-            mIOU_reduced=round(mIOU_reduced,2)
-            if acc_global>best_global_accuracy:
-                best_global_accuracy=acc_global
-            if mIOU > best_mIU:
-                best_mIU=mIOU
-                print(f"New best mIoU: {best_mIU}. Saving model...")
-                save_path = f"{save_dir}/{model_str}_{method}_{dataset}_{number_of_shots}shot_run{run}_best.pth"
-                torch.save(model.state_dict(), save_path)
+    best_mIU = 0
+    eval_on_epochs = get_epochs_to_eval(config)
 
+    for epoch in range(config["epochs"]):
+        if hasattr(train_set, 'build_epoch'):
+            train_set.build_epoch()
+        
+        avg_loss = train_one_epoch(model, loss_fun, optimizer, train_loader, lr_scheduler, config["mixed_precision"], scaler, _run, epoch)
+        _run.log_scalar("metrics.avg_epoch_loss", avg_loss, step=epoch)
+
+        if epoch in eval_on_epochs:
+            if config["bn_precise_stats"]:
+                print("Calculating precise BN stats...")
+                compute_precise_bn_stats(model, train_loader, config["bn_precise_num_samples"])
+
+            confmat = ConfusionMatrix(config["num_classes"], config["exclude_classes"])
+            evaluate(model, val_loader, device, confmat, config["mixed_precision"], config["max_eval"])
+            
+            print(f"--- Evaluation at Epoch {epoch} ---")
+            print(confmat)
+            
+            acc_global, _, iu = confmat.compute()
+            mIOU = sum(iu) / len(iu)
+            
+            _run.log_scalar("eval.mIoU", mIOU, step=epoch)
+            _run.log_scalar("eval.global_accuracy", acc_global, step=epoch)
+
+            if mIOU > best_mIU:
+                best_mIU = mIOU
+                print(f"New best mIoU: {best_mIU:.2f}. Saving model...")
+                save_path = os.path.join(save_dir, "best_model.pth")
+                torch.save(model.state_dict(), save_path)
+                _run.log_scalar("eval.best_mIoU", best_mIU, step=epoch)
+
+    # --- Finalization ---
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print(f"Best mIOU: {best_mIU}\n")
-    print(f"Best global accuracy: {best_global_accuracy}\n")
-    print(f"Training time {total_time_str}\n")
-    print(f"Training time {total_time_str}")
-    return best_mIU,best_global_accuracy
+    print(f"Training finished in {total_time_str}.")
+    print(f"Final Best mIoU: {best_mIU:.2f}")
 
-def train_3runs(model, method, dataset, number_of_shots, learning_rate, input_size):
-    print(f'dataset is {dataset}')
-    if dataset == "disaster" :
-        config_filename = "configs/disaster.yaml"
-    else:
-        raise ValueError(f"Unsupported dataset: {dataset}. This project is configured only for the 'disaster' dataset.")
+    # Add the final best model as a named artifact for easy access
+    final_model_path = os.path.join(save_dir, "best_model.pth")
+    if os.path.exists(final_model_path):
+        _run.add_artifact(final_model_path, name="best_model.pth")
 
-    with open(config_filename) as file:
-        config=yaml.full_load(file)
-    config["lr"] = learning_rate
-    config["input_size"] = input_size
-
-    configs=[]
-    for run in range(1,4):
-        new_config = copy.deepcopy(config)
-        new_config["run"] = run
-        new_config["RNG_seed"] = run-1
-        configs.append(new_config)
-    train_multiple(configs, model, method, dataset, number_of_shots)
-
-
-if __name__=='__main__':
-    from argparse import ArgumentParser
-    parser = ArgumentParser()
-    parser.add_argument("--models", nargs = '+')
-    parser.add_argument("--methods", nargs = '+')
-    parser.add_argument("--lr", nargs = '+')
-    parser.add_argument("--dataset", type = str)
-    parser.add_argument("--nb-shots", type = int)
-    parser.add_argument("--input-size", type = int, default = 1024)
-
-    
-    args = parser.parse_args()
-    #lr_list = [1e-2 , 1e-3 , 1e-4 , 1e-5 , 1e-6]
-    lr_list = args.lr
-    for method in args.methods : 
-        for model in args.models :
-            for learning_rate in lr_list :  
-                print(f"START TRAINING {model} WITH {method} WITH {learning_rate} AND {args.nb_shots} SHOT")
-                train_3runs(model, method, args.dataset, args.nb_shots, float(learning_rate), float(args.input_size))
+    return best_mIU

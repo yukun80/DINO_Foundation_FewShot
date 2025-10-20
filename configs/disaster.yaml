@@ -2,11 +2,11 @@
 num_classes: 2
 ignore_value: 255
 dino_version: 2
-dinov2_size: base
+dinov2_size: base # Supported sizes: small, base, large
 
 #OPTIM:
-epochs: 200
-lr: 0.00001
+epochs: 300
+lr: 0.001
 momentum: 0.9
 weight_decay: 0.0001
 bn_weight_decay: False
@@ -26,7 +26,7 @@ exclude_classes: []
 
 #dataset
 dataset_name: disaster
-split_file: datasets/disaster_10shot_splits.json
+split_file: datasets/disaster_20shot_splits.json
 batch_size: 1 # For few-shot, batch size is often 1
 train_min_size: 512
 train_max_size: 512
@@ -38,7 +38,7 @@ num_workers: 8
 class_uniform_pct: 0.0
 train_split: 'support' # Use the support set for training/fine-tuning
 val_split: 'query'   # Use the query set for validation
-max_eval: 40 # Corresponds to the query set size
+max_eval: 300 # Corresponds to the query set size
 eval_print_every: 10
 train_print_every: 10
 
@@ -49,3 +49,6 @@ dataset_dir : ../_datasets/Exp_Disaster_Few-Shot # Relative path to dataset
 save_dir: ./exp/models_disaster/
 model_path : ./pretrain
 model_repo_path : ./exp/
+# Path to the pretrained linear decoder weights, used for methods like 'svf'
+# If left empty or null, the framework will default to the current behavior.
+linear_weights_path: ./exp/models_disaster/DINO_linear_disaster_100shot_run1_best.pth # Example: './exp/models_disaster/DINO_linear_disaster_10shot_run1_best.pth'

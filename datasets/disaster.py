@@ -53,7 +53,8 @@ class DisasterDataset(Dataset):
         Fetches the sample at the given index.
 
         Returns:
-            tuple: (image, label) where image is the input tensor and label is the segmentation mask.
+            tuple: (image, label, image_path) where image is the input tensor, 
+                   label is the segmentation mask, and image_path is the original file path.
         """
         try:
             # Open image and label using rasterio
@@ -79,10 +80,12 @@ class DisasterDataset(Dataset):
                 # image_tensor, label_tensor = self.transforms(image_tensor, label_tensor)
                 pass
 
-            return image_tensor, label_tensor
+            # Return the image path along with the tensors for the prediction script
+            return image_tensor, label_tensor, self.images[idx]
 
         except Exception as e:
             print(f"Error loading sample at index {idx}: {self.images[idx]}")
             print(f"Error: {e}")
             # Return empty tensors or handle appropriately
-            return torch.zeros((3, 512, 512)), torch.zeros((512, 512), dtype=torch.long)
+            return torch.zeros((3, 512, 512)), torch.zeros((512, 512), dtype=torch.long), ""
+
