@@ -3,6 +3,8 @@ num_classes: 2
 ignore_value: 255
 dino_version: 2
 dinov2_size: base # Supported sizes: small, base, large
+enable_frequency_adapter: true
+freq_mask_mode: per_layer # per_layer, shared
 
 #OPTIM:
 epochs: 300
@@ -18,7 +20,6 @@ warmup_iters: 10
 warmup_factor: 0.1
 
 #TRAIN:
-mixed_precision: False
 run: 1
 RNG_seed: 0
 loss_type: cross_entropy
@@ -47,7 +48,7 @@ eval_every_k_epochs: 10
 eval_last_k_epochs: 5
 dataset_dir : ../_datasets/Exp_Disaster_Few-Shot # Relative path to dataset
 save_dir: ./exp/models_disaster/
-model_path : ./pretrain
+pretrain_dir : ./pretrain
 model_repo_path : ./exp/
 # Path to the pretrained linear decoder weights, used for methods like 'svf'
 # If left empty or null, the framework will default to the current behavior.

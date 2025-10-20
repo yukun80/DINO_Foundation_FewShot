@@ -27,7 +27,7 @@ Key Changes:
       python3 train.py with method=linear nb_shots=10 lr=0.01 run_id=1
       
     - **multilayer**
-      python3 train.py with method=multilayer nb_shots=10 lr=0.001 run_id=1
+      python3 train.py with method=multilayer nb_shots=20 lr=0.001 run_id=1
 
     - **SVF (10-shot, LR=0.0001, Run 1, requires a pre-trained linear decoder):**
       python3 train.py with method=svf nb_shots=10 lr=0.0001 run_id=1
@@ -45,7 +45,6 @@ import datetime
 import time
 import torch
 import yaml
-import torch.cuda.amp as amp
 import os
 import random
 import numpy as np
@@ -146,14 +145,13 @@ class ConfusionMatrix:
         )
 
 
-def evaluate(model, data_loader, device, confmat, mixed_precision, max_eval):
+def evaluate(model, data_loader, device, confmat, max_eval):
     """Evaluates the model on the validation set."""
     model.eval()
     with torch.no_grad():
         for i, (image, target, _) in enumerate(data_loader):
             image, target = image.to(device), target.to(device)
-            with amp.autocast(enabled=mixed_precision):
-                output = model(image)
+            output = model(image)
             output = torch.nn.functional.interpolate(output, size=target.shape[-2:], mode='bilinear', align_corners=False)
             confmat.update(output.argmax(1).flatten(), target.flatten())
             if i + 1 == max_eval:
@@ -161,21 +159,19 @@ def evaluate(model, data_loader, device, confmat, mixed_precision, max_eval):
     return confmat
 
 
-def train_one_epoch(model, loss_fun, optimizer, loader, lr_scheduler, mixed_precision, scaler, _run, epoch):
+def train_one_epoch(model, loss_fun, optimizer, loader, lr_scheduler, _run, epoch):
     """Trains the model for one epoch."""
     model.train()
     total_loss = 0
     for t, (image, target, _) in enumerate(loader):
         image, target = image.to("cuda"), target.to("cuda")
-        with amp.autocast(enabled=mixed_precision):
-            output = model(image)
-            output = torch.nn.functional.interpolate(output, size=target.shape[-2:], mode='bilinear', align_corners=False)
-            loss = loss_fun(output, target.long())
+        output = model(image)
+        output = torch.nn.functional.interpolate(output, size=target.shape[-2:], mode='bilinear', align_corners=False)
+        loss = loss_fun(output, target.long())
 
         optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        loss.backward()
+        optimizer.step()
         lr_scheduler.step()
         
         total_loss += loss.item()
@@ -230,8 +226,10 @@ def main(_run, config):
             num_classes=config["num_classes"],
             input_size=config["input_size"],
             model_repo_path=config["model_repo_path"],
-            model_path=config["model_path"],
-            dinov2_size=config.get("dinov2_size", "base")
+            pretrain_dir=config["pretrain_dir"],
+            dinov2_size=config.get("dinov2_size", "base"),
+            enable_frequency_adapter=config.get("enable_frequency_adapter", True),
+            freq_mask_mode=config.get("freq_mask_mode", "per_layer"),
         )
     else:
         raise NotImplementedError(f"Model '{config['model_name']}' is not supported.")
@@ -257,7 +255,6 @@ def main(_run, config):
     # --- Data, Optimizer, and Scheduler ---
     train_loader, val_loader, train_set = get_dataset_loaders(config)
     optimizer = get_optimizer(model, config)
-    scaler = amp.GradScaler(enabled=config["mixed_precision"])
     loss_fun = get_loss_fun(config)
     total_iterations = len(train_loader) * config["epochs"]
     lr_scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_iterations, power=config["poly_power"])
@@ -271,7 +268,7 @@ def main(_run, config):
         if hasattr(train_set, 'build_epoch'):
             train_set.build_epoch()
         
-        avg_loss = train_one_epoch(model, loss_fun, optimizer, train_loader, lr_scheduler, config["mixed_precision"], scaler, _run, epoch)
+        avg_loss = train_one_epoch(model, loss_fun, optimizer, train_loader, lr_scheduler, _run, epoch)
         _run.log_scalar("metrics.avg_epoch_loss", avg_loss, step=epoch)
 
         if epoch in eval_on_epochs:
@@ -280,7 +277,7 @@ def main(_run, config):
                 compute_precise_bn_stats(model, train_loader, config["bn_precise_num_samples"])
 
             confmat = ConfusionMatrix(config["num_classes"], config["exclude_classes"])
-            evaluate(model, val_loader, device, confmat, config["mixed_precision"], config["max_eval"])
+            evaluate(model, val_loader, device, confmat, config["max_eval"])
             
             print(f"--- Evaluation at Epoch {epoch} ---")
             print(confmat)

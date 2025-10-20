@@ -11,17 +11,12 @@ Purpose:
 
 --- Example Usage ---
 
-`python3 eval.py with model_path='path/to/your/model.pth' nb_shots=10`
+python3 eval.py with checkpoint_path='experiments/FSS_Training/1/best_model.pth' method=multilayer nb_shots=20
 
-python3 eval.py with model_path='experiments/FSS_Training/2/best_model.pth' nb_shots=20
-
-- The `model_path` is required.
-- Other parameters (`method`, `dataset`, `input_size`, etc.) should match the
-  training configuration of the model being evaluated.
 """
 
 # --- Example Command ---
-# python3 eval.py with model_path='experiments/FSS_Training/1/best_model.pth' nb_shots=10
+# python3 eval.py with checkpoint_path='experiments/FSS_Training/1/best_model.pth' nb_shots=10
 # -----------------------
 
 import os
@@ -53,7 +48,7 @@ def cfg():
         config = yaml.full_load(file)
 
     # --- Command-line accessible parameters ---
-    model_path = None  # REQUIRED: Path to the trained model .pth file
+    checkpoint_path = None  # REQUIRED: Path to the trained model .pth file
     model_name = "DINO"
     method = "linear"
     dataset = "disaster"
@@ -62,7 +57,7 @@ def cfg():
 
     # Merge CLI-accessible parameters into the main config dictionary
     config.update({
-        "model_path": model_path,
+        "checkpoint_path": checkpoint_path,
         "model_name": model_name,
         "method": method,
         "dataset": dataset,
@@ -159,13 +154,13 @@ def main(_run, config: Dict[str, Any]):
     """
     The main entry point for the evaluation script, managed by Sacred.
     """
-    if config["model_path"] is None:
-        raise ValueError("A `model_path` must be provided via the command line. Ex: `with model_path='path/to/model.pth'`")
+    if config["checkpoint_path"] is None:
+        raise ValueError("A `checkpoint_path` must be provided via the command line. Ex: `with checkpoint_path='path/to/model.pth'`")
 
     # --- Environment Setup ---
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    print(f"Evaluating model from: {config['model_path']}")
+    print(f"Evaluating model from: {config['checkpoint_path']}")
 
     # --- Model Initialization and Loading ---
     print("Initializing model...")
@@ -176,16 +171,19 @@ def main(_run, config: Dict[str, Any]):
             num_classes=config["num_classes"],
             input_size=config["input_size"],
             model_repo_path=config["model_repo_path"],
-            model_path=config["model_path"],
-            dinov2_size=config.get("dinov2_size", "base")
+            pretrain_dir=config["pretrain_dir"],
+            dinov2_size=config.get("dinov2_size", "base"),
+            enable_frequency_adapter=config.get("enable_frequency_adapter", True),
+            freq_mask_mode=config.get("freq_mask_mode", "per_layer"),
         )
     else:
         raise NotImplementedError(f"Model '{config['model_name']}' is not supported.")
 
-    if not os.path.exists(config["model_path"]):
-        raise FileNotFoundError(f"Model checkpoint not found at: {config['model_path']}")
-        
-    model.load_state_dict(torch.load(config["model_path"], map_location=device))
+    checkpoint_path = config["checkpoint_path"]
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Model checkpoint not found at: {checkpoint_path}")
+
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.to(device)
 
     # --- Data Loading ---
@@ -206,7 +204,7 @@ def main(_run, config: Dict[str, Any]):
     print("="*50 + "\n")
 
     # Add the model path as an artifact for traceability
-    _run.add_artifact(config["model_path"])
+    _run.add_artifact(config["checkpoint_path"])
 
     print(f"Evaluation complete. Results logged to Sacred run {_run._id}.")
     return computed_metrics["Mean_IoU"]
