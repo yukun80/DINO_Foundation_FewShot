@@ -157,6 +157,7 @@ def main(_run, config: Dict[str, Any]):
             model_repo_path=config["model_repo_path"],
             pretrain_dir=config["pretrain_dir"],
             dinov2_size=config.get("dinov2_size", "base"),
+            dinov3_size=config.get("dinov3_size", "base"),
             enable_frequency_adapter=config.get("enable_frequency_adapter", True),
             freq_mask_mode=config.get("freq_mask_mode", "per_layer"),
         )

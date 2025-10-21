@@ -26,7 +26,7 @@ pipeline.
 | `enable_frequency_adapter` | Toggles APM/ACPA stack; set `false` for ablations. |
 | `freq_mask_mode` | Adapter sharing: `per_layer` (default) or `shared`. |
 | `dinov2_size` | Backbone width (`small`, `base`, `large`). Must match pretrain files. |
-| `method` | Few-shot head (`linear`, `multilayer`, `svf`, `lora`, `vpt`). |
+| `method` | Few-shot head (`linear`, `multilayer`, `svf`, `lora`). |
 | `number_of_shots` | Support/query split size; ensure split files agree. |
 
 > All Sacred scripts (`train.py`, `eval.py`, `predict.py`) merge overrides
@@ -49,7 +49,7 @@ python3 train.py with method=<mode> nb_shots=<shots> lr=<lr> run_id=<n>
 
 - Artifacts land in `experiments/FSS_Training/<run_id>` with
   `best_model.pth` and Sacred logs.
-- `svf`, `lora`, `vpt` still expect a pretrained linear decoder (see config
+- `svf`, `lora` still expect a pretrained linear decoder (see config
   `linear_weights_path`).
 
 ## Evaluation Agent
@@ -66,6 +66,18 @@ python3 eval.py with \
   settings from `configs/disaster.yaml` plus any overrides.
 - Metrics (mIoU, OA, Precision/Recall/F1) are logged under
   `experiments/FSS_Evaluation/<run>`.
+
+### Checkpoint Compatibility (Frequency Adapter)
+
+- The frequency adapter masks are lazily defined. The loader now hydrates
+  `mask_amplitude`/`mask_phase` directly from checkpoints (no warm‑up forward
+  needed).
+- Keep `enable_frequency_adapter` and `freq_mask_mode` identical between
+  training and evaluation. If enabled during training, the checkpoint will
+  contain `frequency_adapter.*` keys and the eval model must include the
+  adapter too.
+- `method` controls branch count (`multilayer` = 4, others = 1). Changing it
+  between train/eval alters mask shapes and will break strict loading.
 
 ## Prediction Agent
 
@@ -95,3 +107,20 @@ python3 predict.py with \
   `enable_frequency_adapter=false` or use `freq_mask_mode=shared` to reduce
   adapter capacity and isolate gains.
 
+## Troubleshooting
+
+- Unexpected keys (e.g., `frequency_adapter.masks.0.mask_amplitude`):
+  - Reason: Model built without the adapter, or masks not yet registered.
+  - Fix: Ensure `enable_frequency_adapter=true` if used in training. The
+    current loader creates masks during load; re-run after pulling updates.
+
+- Missing keys for `frequency_adapter.masks.*`:
+  - Reason: Loading a checkpoint trained without the adapter into a model with
+    the adapter enabled, or changing branch/mode.
+  - Fix: Align `enable_frequency_adapter`, `freq_mask_mode`, and `method` with
+    training; otherwise load with `strict=False` only if intentionally
+    changing architecture.
+
+- Shape errors after switching `freq_mask_mode` or `method`:
+  - Reason: `per_layer` stores per-branch masks; `shared` stores one mask.
+  - Fix: Keep these settings consistent across train/eval or retrain.

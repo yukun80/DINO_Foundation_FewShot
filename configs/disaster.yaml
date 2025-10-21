@@ -1,8 +1,9 @@
 #MODEL:
 num_classes: 2
 ignore_value: 255
-dino_version: 2
-dinov2_size: base # Supported sizes: small, base, large
+dino_version: 3
+dinov2_size: base # Supported sizes: small, base
+dinov3_size: large # Supported sizes: base, large
 enable_frequency_adapter: true
 freq_mask_mode: per_layer # per_layer, shared
 

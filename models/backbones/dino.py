@@ -83,6 +83,119 @@ def create_backbone_dinov2(method, model_repo_path, pretrain_dir, dinov2_size="b
         )
     return dino_backbone
 
+
+def _load_state_dict_safely(module: nn.Module, ckpt_path: str, strict: bool = True):
+    """Load a state dict from a checkpoint path with common-key handling.
+
+    This helper increases robustness across differently packed checkpoints
+    by probing common keys (e.g., 'state_dict', 'model').
+    """
+    state = torch.load(ckpt_path, map_location="cpu")
+    if isinstance(state, dict):
+        # Try common containers first
+        for key in ["state_dict", "model", "module"]:
+            if key in state and isinstance(state[key], dict):
+                try:
+                    module.load_state_dict(state[key], strict=strict)
+                    return
+                except Exception:
+                    pass
+        # Fall back to assuming it's already a flat state_dict
+        try:
+            module.load_state_dict(state, strict=strict)
+            return
+        except Exception:
+            # As a last resort, try non-strict to maximize compatibility while warning
+            missing, unexpected = module.load_state_dict(state, strict=False)
+            warn_msg = [
+                f"Non-strict load used for '{ckpt_path}'.",
+                f"Missing keys: {list(missing)[:10]}{' ...' if len(missing) > 10 else ''}",
+                f"Unexpected keys: {list(unexpected)[:10]}{' ...' if len(unexpected) > 10 else ''}",
+            ]
+            print("\n".join(warn_msg))
+            return
+    else:
+        # Unknown format; let it raise for visibility
+        module.load_state_dict(state, strict=strict)
+
+
+def create_backbone_dinov3(method, pretrain_dir, dinov3_size: str = "base"):
+    """Build a DINOv3 ViT backbone and adapt its forward for feature extraction.
+
+    - method 'multilayer': return the last 4 layers; otherwise return the last layer.
+    - reshape=True so outputs are in [B, C, H, W] for downstream decoders.
+    """
+    from dinov3.models.vision_transformer import vit_base, vit_large
+
+    # Resolve checkpoint path and peek into its keys to configure the model accordingly
+    if dinov3_size == "base":
+        ckpt_name = "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
+        base_channels = 768
+    elif dinov3_size == "large":
+        ckpt_name = "dinov3_vitl16_pretrain_sat493m-eadcf0ff.pth"
+        base_channels = 1024
+    else:
+        raise ValueError(
+            f"Unsupported DINOv3 size: '{dinov3_size}'. Please choose 'base' or 'large'."
+        )
+
+    ckpt_path = os.path.join(pretrain_dir, ckpt_name)
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"DINOv3 weights not found: {ckpt_path}")
+
+    raw = torch.load(ckpt_path, map_location="cpu")
+    # Unwrap state dict if needed
+    if isinstance(raw, dict):
+        for k in ["state_dict", "model", "module"]:
+            if k in raw and isinstance(raw[k], dict):
+                sd = raw[k]
+                break
+        else:
+            sd = raw if all(isinstance(v, torch.Tensor) for v in raw.values()) else raw
+    else:
+        sd = raw
+
+    # Infer architecture flags from checkpoint keys
+    def has_key_suffix(suffix: str) -> bool:
+        return any(k.endswith(suffix) for k in sd.keys())
+
+    n_storage_tokens = 0
+    if "storage_tokens" in sd and isinstance(sd["storage_tokens"], torch.Tensor):
+        # shape = [1, N, C]
+        n_storage_tokens = int(sd["storage_tokens"].shape[1])
+
+    mask_k_bias = has_key_suffix("attn.qkv.bias_mask")
+    use_layerscale = has_key_suffix("ls1.gamma") or has_key_suffix("ls2.gamma")
+    layerscale_init = 1e-6 if use_layerscale else None
+    untie_cls_and_patch_norms = any(k.startswith("cls_norm.") for k in sd.keys())
+
+    common_kwargs = dict(
+        patch_size=16,
+        n_storage_tokens=n_storage_tokens,
+        mask_k_bias=mask_k_bias,
+        layerscale_init=layerscale_init,
+        untie_cls_and_patch_norms=untie_cls_and_patch_norms,
+    )
+
+    backbone = vit_base(**common_kwargs) if dinov3_size == "base" else vit_large(**common_kwargs)
+
+    # Now strictly load with the tuned flags
+    _load_state_dict_safely(backbone, ckpt_path, strict=True)
+
+    # Select last layers based on depth to avoid hard-coding indices
+    depth = getattr(backbone, "n_blocks", None) or 12
+    if method == "multilayer":
+        n = list(range(depth - 4, depth))
+    else:
+        n = [depth - 1]
+
+    backbone.forward = partial(
+        backbone.get_intermediate_layers,
+        n=n,
+        reshape=True,
+    )
+    return backbone, base_channels
+
 class DINO_linear(nn.Module):
     def __init__(
         self,
@@ -93,6 +206,7 @@ class DINO_linear(nn.Module):
         model_repo_path,
         pretrain_dir,
         dinov2_size="base",
+        dinov3_size="base",
         enable_frequency_adapter=True,
         freq_mask_mode="per_layer",
     ):
@@ -112,14 +226,12 @@ class DINO_linear(nn.Module):
                 base_channels = 1024
             else:
                 raise ValueError(f"Unsupported DINOv2 size: '{dinov2_size}'. Please choose 'small', 'base' or 'large'.")
+        elif self.version == 3:
+            self.encoder, base_channels = create_backbone_dinov3(method, pretrain_dir, dinov3_size)
         else : # DINOv1
             self.encoder = create_backbone_dino(method, model_repo_path, pretrain_dir)
             base_channels = 384 # DINOv1 vit_small has 384
 
-        if self.method == "vpt" : 
-            for param in self.encoder.parameters():
-                param.requires_grad = False
-            self.encoder.register_tokens.requires_grad = True
         if method == "svf" : 
             self.encoder = resolver(self.encoder)
         if method == "lora" : 

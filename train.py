@@ -228,6 +228,7 @@ def main(_run, config):
             model_repo_path=config["model_repo_path"],
             pretrain_dir=config["pretrain_dir"],
             dinov2_size=config.get("dinov2_size", "base"),
+            dinov3_size=config.get("dinov3_size", "base"),
             enable_frequency_adapter=config.get("enable_frequency_adapter", True),
             freq_mask_mode=config.get("freq_mask_mode", "per_layer"),
         )
@@ -237,7 +238,7 @@ def main(_run, config):
     print_trainable_parameters(model)
 
     # --- Load Pre-trained Decoder if Applicable ---
-    if config["method"] in ["svf", "lora", "vpt"]:
+    if config["method"] in ["svf", "lora"]:
         linear_weights_path = config.get("linear_weights_path") or \
             f"./exp/models_disaster/{config['model_name']}_linear_{config['dataset']}_{config['number_of_shots']}shot_run{config['run']}_best.pth"
         
